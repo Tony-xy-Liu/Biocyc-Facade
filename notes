@@ -1,0 +1,8 @@
+DNA -> UniProt, uniprot has homologs >> what if matches to variant, but not the one specific variant in metacyc?
+DNA -> metacyc, now extra blast step just to make protein prediction
+
+EC not specific enough ex https://metacyc.org/META/NEW-IMAGE?type=REACTION&object=ALCOHOL-DEHYDROG-GENERIC-RXN
+1.1.1.1
+RC-OH -> RC=O via NAD+
+
+need to eventually use the compounds in reaction
