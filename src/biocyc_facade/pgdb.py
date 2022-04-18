@@ -99,55 +99,6 @@ class Pgdb:
     def GetDatFields(self, dat: Dat) -> set[str]:
         return set([x[0] for x in self.registry.GetTable('json_keys_of_dats').Select(['key'], where=f"table_name='{dat.table_name}'")])
 
-    # def _makeMappingPlan(self, source: Dat, dest: Dat):
-    #     def usekey(key):
-    #         return lambda v: v.get(key, list())
-    #     passthrough = lambda v: v
-
-    #     # from: (to, table, method)
-    #     RELATIONS = {
-    #         Dat.PATHWAYS: [
-    #             (Dat.REACTIONS, Dat.PATHWAYS, usekey('REACTION-LIST')),
-    #         ],
-    #         Dat.REACTIONS: [
-    #             (Dat.PATHWAYS, Mapping.RXN_PATHWAY, passthrough),
-    #             (Dat.ENZRXNS, Dat.REACTIONS, usekey('ENZYMATIC-REACTION')),
-    #         ],
-    #         Dat.ENZRXNS: [
-    #             (Dat.REACTIONS, Dat.ENZRXNS, usekey('REACTION')),
-    #             (Dat.PROTEINS, Dat.ENZRXNS, usekey('ENZYME')),
-    #         ],
-    #         Dat.PROTEINS: [
-    #             (Dat.ENZRXNS, Mapping.PROT_ENZRXN, passthrough),
-    #         ]
-    #     }
-
-    #     def find(curr, path):
-    #         if curr == dest:
-    #             return path
-    #         for to, table, fn in RELATIONS.get(curr, []):
-    #             find(to, path+[(table, fn)])
-    #         return None
-
-    #     path = find(source, [])
-    #     assert path is not None, f"no known way to get from {source.name} to {dest.name}"
-    #     for t, fn in path:
-    #         pass
-
-    # def MapEntries(self, source: Dat, id: str, dest: Dat):
-    #     pass
-
-    # def GetMapping(self, map: Mapping) -> dict[str, list[str]]:
-    #     table = self.registry.GetTable(map.table_name)
-    #     fields = table.fields.values()
-    #     pks = [f.name for f in fields if f.is_pk]
-    #     mapping = {}
-    #     for entry in table.Select(pks+['found_in']):
-    #         v = entry[-1]
-    #         k = '_'.join(entry[:-1])
-    #         dictAppend(mapping, k, v)
-    #     return mapping
-
 def ImportFromBiocyc(db_path: str, flat_files: str) -> Pgdb:
     if flat_files[-1] == '/': flat_files = flat_files[:-1] 
     assert not os.path.isfile(db_path), f'can not import into {db_path} since it already exists'
