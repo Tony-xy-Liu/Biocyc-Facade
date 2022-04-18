@@ -23,14 +23,6 @@ class Field:
 
         self.sql = f'{self.name} {dtype.value} NOT NULL'
 
-class ForeignKey(Field):
-    def __init__(self, field: Field, ref_table: Table, ref_field: Field) -> None:
-        assert ref_field.name in ref_table.fields, "referenced field must be within referenced table"
-        super().__init__(field.name, field.is_pk, field.dtype, True)
-        self.sql = field.sql
-        self.ref_table = ref_table.name
-        self.ref_field = ref_field.name
-
 class Table:
     def __init__(self, db, name, fields, type='') -> None:
         """use Database.MakeTable() instead of initializer"""
@@ -172,11 +164,33 @@ class Database:
 
         self.registry = RegistryTable(self)
 
-        si_name = 'si'
-        sim_name = 'sim'
-        r = self.registry
-        if r.HasTable(si_name):
-            self.secondary_index = r.GetTable(si_name)
+        def create_if_not_exists(name, fields, ttype):
+            r = self.registry
+            if r.HasTable(name):
+                return r.GetTable(name)
+            else:
+                self.secondary_index = self.MakeTable(name, fields, ttype)
+
+        self.secondary_index = create_if_not_exists('si',[
+            Field('table_name', is_pk=True),
+            Field('index_name', is_pk=True),
+            Field('p_key', is_pk=True),
+            Field('s_key', is_pk=True),
+        ], 'secondary_index')
+
+        self.si_mappings = create_if_not_exists('sim', [
+            Field('a', True),
+            Field('b', True),
+            Field('key', False),
+        ], 'secondary_index_mappings')
+
+        self.data_table_keys = create_if_not_exists('data_keys', [
+            Field('key', is_pk=True),
+            Field('table_name', is_pk=True),
+        ])
+        jk_name = 'data_keys'
+        if r.HasTable(jk_name):
+            self.secondary_index = r.GetTable(jk_name)
         else:
             self.secondary_index = self.MakeTable(si_name, [
                 Field('table_name', is_pk=True),
@@ -184,14 +198,6 @@ class Database:
                 Field('p_key', is_pk=True),
                 Field('s_key', is_pk=True),
             ], 'secondary_index')
-        if r.HasTable(sim_name):
-            self.si_mappings = r.GetTable(sim_name)
-        else:
-            self.si_mappings = Table(self, sim_name, [
-                Field('a', True),
-                Field('b', True),
-                Field('key', False),
-            ],'secondary_index_mappings')
 
         def onExit():
             self._con.close()
