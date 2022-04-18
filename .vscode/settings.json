@@ -1,0 +1,8 @@
+{
+    "python.autoComplete.extraPaths": [
+        "/home/tony/workspace/python/grad/resources/Biocyc-Facade/src/",
+    ],
+    "python.analysis.extraPaths": [
+        "/home/tony/workspace/python/grad/resources/Biocyc-Facade/src/"
+    ]
+}
