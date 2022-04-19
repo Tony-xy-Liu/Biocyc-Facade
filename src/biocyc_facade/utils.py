@@ -6,9 +6,10 @@ def jdumps(obj: Any):
 
 jloads = json.loads
 
-def dictAppend(d:dict, k, v):
+def dictAppend(d:dict, k, v, unique=False):
     arr = d.get(k, list())
     arr.append(v)
+    if unique: arr = list(set(arr))
     d[k] = arr
 
 def toLetters(i: int):

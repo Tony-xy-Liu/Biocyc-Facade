@@ -4,69 +4,63 @@ import os
 import json
 from enum import Enum
 
-from biocyc_facade.models.sql import STAR, Database, DType, Field, Table, ForeignKey
+from biocyc_facade.models.sql import STAR, Database, Field, SecondaryIndex as SI, Dat as sqlDat, TraceStep
 from .utils import dictAppend, parseDat, jdumps, jloads
 
-class Dat(Enum):
-    PROTEINS = 'proteins.dat', ['DBLINKS']
-    ENZRXNS = 'enzrxns.dat', ['REACTION', 'ENZYME']
-    PATHWAYS = 'pathways.dat', ['REACTION-LIST']
+class Dat(sqlDat):
+    PROTEINS = 'proteins.dat'
+    REACTIONS = 'reactions.dat'
+    ENZRXNS = 'enzrxns.dat'
+    PATHWAYS = 'pathways.dat'
     GENES = 'genes.dat'
     REGULATION = 'regulation.dat'
-    REACTIONS = 'reactions.dat', ['EC-NUMBER']
     COMPOUNDS = 'compounds.dat'
     PROTEIN_FEATURES = 'protein-features.dat'
     PRO_LIGAND_CPLX = 'protligandcplxes.dat'
     RNAS = 'rnas.dat'
     SPECIES = 'species.dat'
 
-    def __init__(self, val: str, secondary_indexes: list[str]=list()) -> None:
-        super().__init__()
-        self.file = val
-        self.table_name = val.replace('.', '_').replace('-', '_')
-        self.secondary_indexes = secondary_indexes
+Dat.PROTEINS.SetSIs([
+    ('DBLINKS', 'P-DBLINKS'),
+    ('COMMON-NAME', 'P-COMMON-NAME'),
+])
+Dat.REACTIONS.SetSIs([
+    ('EC-NUMBER', 'EC-NUMBER'),
+    ('COMMON-NAME', 'R-COMMON-NAME'),
+])
+Dat.ENZRXNS.SetSIs([
+    ('REACTION', Dat.REACTIONS, 'E->REACTIONS'),
+    ('ENZYME', Dat.PROTEINS),
+    ('COMMON-NAME', 'E-COMMON-NAME'),
+])
+Dat.PATHWAYS.SetSIs([
+    ('REACTION-LIST', Dat.REACTIONS, 'W->REACTIONS'),
+    ('COMMON-NAME', 'W-COMMON-NAME'),
+])
+Dat.GENES.SetSIs([
+    ('DBLINKS', 'DBLINKS', 'G-DBLINKS'),
+    ('COMMON-NAME', 'G-COMMON-NAME'),
+])
 
-# class Mapping(Enum):
-#     DB_PROT =       'proteins_dat',    'dblinks_proteins_map', 'DBLINKS',              'proteins_dat'
-#     PROT_ENZRXN =   'enzrxns_dat',     'protein_enzrxn_map',   'ENZYME',               'proteins_dat'
-#     ENZRXN_RXN =    'reactions_dat',   'enzrxn_reaction_map',  'ENZYMATIC-REACTION',   'enzrxns_dat'
-#     RXN_PATHWAY =   'pathways_dat',    'reaction_pathway_map', 'REACTION-LIST',        'reactions_dat'
-#     def __init__(self, to: str, table: str, via: str, frm: str) -> None:
-#         super().__init__()
-#         self.table_name = table
-#         self.map_from = frm
-#         self.map_to = to
-#         self.map_key = via 
-
-class Pgdb:
+class Pgdb(Database):
     EXT = 'pgdb'
     SCHEMA_VER = 1
 
     def __init__(self, db_path: str) -> None:
-        db = Database(db_path, ext=Pgdb.EXT)        
-        self._database = db
-        self.registry = db.registry
+        super().__init__(db_path, ext=Pgdb.EXT)  
 
         T_INFO = 'info'
-        T_JKOD = 'json_keys_of_dats'
         if self.registry.HasTable(T_INFO):
-            self.info = db.registry.GetTable(T_INFO)
-            self.json_keys_of_dats = db.registry.GetTable(T_JKOD)
+            self.info = self.registry.GetTable(T_INFO)
         else:
-            META = 'metadata'
-            self.info = db.MakeTable(T_INFO, [
+            self.info = self.AttachTable(T_INFO, [
                 Field('key', is_pk=True),
                 Field('val'),
-            ], type=META)
-
-            self.json_keys_of_dats = db.MakeTable(T_JKOD, [
-                Field('key', is_pk=True),
-                ForeignKey(Field('table_name', is_pk=True), db.registry, db.registry.F_table_name),
-            ], type=META)
+            ], type='metadata')
 
             SV = 'SCHEMA_VER'
             self.info._insert((SV, Pgdb.SCHEMA_VER))
-            self._database._con.commit()
+            self._con.commit()
 
     def GetInfo(self):
         info = {}
@@ -74,37 +68,47 @@ class Pgdb:
             info[k] = v
         return info
 
-    def ListEntries(self, dat: Dat) -> list[str]:
-        table = self.registry.GetTable(dat.table_name)
-        return [i[0] for i in table.Select(['id'])]
+    def Trace(self, source: Dat|str, target: Dat|str):
+        links, rev_links = Dat.GetSILinks()
 
-    def GetEntry(self, dat: Dat, id: str) -> dict:
-        table = self.registry.GetTable(dat.table_name)
-        res = list(table.Select(['json'], where=f"id='{id}'"))
-        assert len(res) > 0, f"{id} not in {dat.value}"
-        return jloads(res[0][0])
+        def getDat(dat):
+            if dat in set(item.value for item in Dat):
+                return Dat(dat)
+            return dat
 
-    def GetDat(self, dat: Dat) -> dict:
-        table = self.registry.GetTable(dat.table_name)
-        fields = table.fields.values()
-        pks = [f.name for f in fields if f.is_pk]
-        data = {}
-        for entry in table.Select(pks+['json']):
-            j = entry[-1]
-            k = '_'.join(entry[:-1])
-            v = jloads(j)
-            data[k] = v
-        return data
+        t_str = str(target)
+        def search(curr, path, dirs):
+            if curr == t_str: return path+[curr], dirs
+            if curr in path: return None
 
-    def GetDatFields(self, dat: Dat) -> set[str]:
-        return set([x[0] for x in self.registry.GetTable('json_keys_of_dats').Select(['key'], where=f"table_name='{dat.table_name}'")])
+            nexts:list[tuple[str, bool]] = [(l, True) for l in links.get(curr, [])]
+            nexts += [(l, False) for l in rev_links.get(curr, [])]
+            for n, fwd in nexts:
+                res = search(n, path+[curr], dirs+[fwd])
+                if res is not None: return res
+            return None
+        res = search(str(source), [], [])
+        
+        assert res is not None, f"no conversion found between [{source}] and [{target}]"
+        path, dirs = res
+        trace = []
+        for i, (p, d) in enumerate(zip(path, dirs)):
+            dat = Dat.FromTableName(p if d else path[i+1])
+            # gets the matching set of p, p+1 in dat.si
+            si = dict((str(sorted((s.table_name, s.target_name))), s) for s in dat.secondary_indexes)
+            k = str(sorted((p, path[i+1])))
+            if k not in si:
+                print(k)
+                print(si)
+            si = si[k]
+            trace.append(TraceStep(d, si))
+        return super().Trace(trace)
 
 def ImportFromBiocyc(db_path: str, flat_files: str) -> Pgdb:
     if flat_files[-1] == '/': flat_files = flat_files[:-1] 
     assert not os.path.isfile(db_path), f'can not import into {db_path} since it already exists'
     
     db = Pgdb(db_path)
-    json_keys_of_dats = db.json_keys_of_dats
 
     # ==========================================================
     # get version info
@@ -128,79 +132,20 @@ def ImportFromBiocyc(db_path: str, flat_files: str) -> Pgdb:
     # ==========================================================
     # load dats
 
-    DAT_TYPE = 'dat'
-    all_dats = {}
-    dat_tables: dict[str, Table] = {}
+    counts = 0
     for edat in Dat:
         dat_file: str = edat.file
-        print(f"loading {dat_file}")
         
         pdat = parseDat(f'{flat_files}/{dat_file}', 'UNIQUE-ID', {
             'DBLINKS': lambda x: x[1:-1].replace('"', '').split(' ')[:2],
             'GIBBS-0': lambda x: x.strip(),
             'MOLECULAR-WEIGHT-EXP': lambda x: x.strip(),
         }, all_fields=True)
+        counts += len(pdat)
 
-        dat_table = db._database.MakeTable(edat.table_name, [
-            Field('id', is_pk=True),
-            Field('json')
-        ], type = DAT_TYPE)
+        db.ImportDataTable(edat.table_name, pdat, edat.secondary_indexes)
 
-        # just using a dict because not enough useful links between tables to justify
-        entries: list[tuple] = []
-        json_keys = set()
-        for k, val in pdat.items():
-            entries.append((k, json.dumps(val, separators=(',', ':'))))
-            json_keys = json_keys.union(set(val.keys()))
+    db.info._insert(('Total_entries', counts))
 
-        dat_table._insertMany(entries)
-        json_keys_of_dats._insertMany([(k, edat.table_name) for k in json_keys])
-        db._database.secondary_index.Add(edat.table_name, pdat, edat.secondary_indexes)
-        all_dats[edat.table_name] = pdat
-        dat_tables[edat.table_name] = dat_table
-
-    # # ==========================================================
-    # # make reverse mappings, like aws dynamo's secondary indexes
-
-    # def makeRev(mapping, revKey, parser):
-    #     rev = {}
-    #     for k, v in mapping.items():
-    #         if revKey not in v: continue
-    #         for val in v[revKey]:
-    #             parsed = parser(val)
-    #             if type(parsed) == list:
-    #                 [dictAppend(rev, p, k) for p in parsed]
-    #             else:
-    #                 dictAppend(rev, parsed, k)
-    #     return rev
-
-    # def linearize(mapping):
-    #     entries = set()
-    #     for k, vs in mapping.items():
-    #         for v in vs:
-    #             if type(k) == tuple:
-    #                 db, id = k
-    #                 entries.add((db, id, v))
-    #             else:
-    #                 entries.add((k, v))
-    #     return list(entries)
-
-    # # source table, mapping name, target id, target table
-    # for mapping in Mapping:
-    #     source, name, target_id, target  = mapping.value
-    #     print(f'mapping {target} to {source} via {target_id}')
-    #     dat_table = dat_tables[target]
-    #     fn = lambda x: x
-    #     fields = [
-    #         Field('id', is_pk=True),
-    #         ForeignKey(Field('found_in', is_pk=True), dat_table, dat_table.fields['id'])
-    #     ]
-    #     if name == Mapping.DB_PROT.table_name:
-    #         fields = [Field('db', is_pk=True)] + fields
-    #         fn = lambda x: tuple(x)
-    #     mapping = makeRev(all_dats[source], target_id, fn)
-    #     table = Table(db._database, name, fields)
-    #     table._insertMany(linearize(mapping))
-
-    db._database.Commit()
+    db.Commit()
     return db
