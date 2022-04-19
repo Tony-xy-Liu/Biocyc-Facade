@@ -9,25 +9,30 @@ class SecondaryIndex:
     def __init__(self, table: str, key: str, target: str, key_in_index: str='') -> None:
         """specifying a unique @key_in_index will make tracing much faster"""
         if key_in_index == '': key_in_index = key
-        self.key = key_in_index
+        self.key_in_secondary_index = key_in_index
         self.table_name = table
-        self.index_name = key
+        self.original_key = key
         self.target_name = target
 
 class TraceStep:
     def __init__(self, forward: bool, index: SecondaryIndex) -> None:
         self.forward = forward
         self.secondary_index = index
-        self.index_name = index.index_name
+        self.index_name = index.original_key
         self.table_name = index.table_name
-        self.tuple = (forward, self.index_name, self.table_name)
+        self.tuple = (forward, index.key_in_secondary_index, self.table_name)
 
 class TraceResult:
-    def __init__(self, result: list[tuple[str, str]], steps: list[TraceStep]) -> None:
+    def __init__(self, result: list[tuple[str, str]], steps: list[TraceStep], sql: str) -> None:
         self.results = result
         self.steps = steps
-        self.keys_used = [s.index_name for s in steps]
+        self.explanation = []
+        for s in steps:
+            a = s.secondary_index.table_name
+            b = s.secondary_index.target_name
+            self.explanation.append((f"{a} -> {b}" if s.forward else f"{b} -> {a}", f"via {s.table_name}.{s.index_name}"))
         self.is_empty = len(self.results) == 0
+        self.sql = sql
 
     def __iter__(self):
         return self.results.__iter__()
@@ -59,7 +64,7 @@ class Dat(Enum):
         def makesi(t):
             k, targ = t[:2]
             si = SecondaryIndex(self.table_name, k, str(targ))
-            if len(t) == 3: si.key = t[2] # added alt_key
+            if len(t) == 3: si.key_in_secondary_index = t[2] # added alt_key
             return si
 
         self.secondary_indexes = list()
@@ -210,7 +215,7 @@ class Database:
         self.si_mappings = create_if_not_exists('sim', [
             Field('a', True),
             Field('b', True),
-            Field('key', False),
+            Field('index_name', False),
         ], 'secondary_index_mappings')
 
         self.data_table_keys = create_if_not_exists('data_keys', [
@@ -218,9 +223,20 @@ class Database:
             Field('table_name', is_pk=True),
         ], 'data_table_keys')
 
+        self.info = create_if_not_exists('info', [
+            Field('key', is_pk=True),
+            Field('val'),
+        ], 'db_metadata')
+
         def onExit():
             self._con.close()
         atexit.register(onExit)
+
+    def GetInfo(self):
+        info = {}
+        for k, v in self.info.Select(STAR):
+            info[k] = v
+        return info
 
     def _addTable(self, table: Table):
         with self._con as con: # transaction
@@ -232,12 +248,12 @@ class Database:
         self._addTable(table)
         return table
 
-    def ImportDataTable(self, name: str, data: dict, secondary_indexes:list[SecondaryIndex]=list()):
-        print(f"loading [{name}]")
+    def ImportDataTable(self, table_name: str, data: dict, secondary_indexes:list[SecondaryIndex]=list()):
+        print(f"loading [{table_name}]")
         for si in secondary_indexes:
-            print(f"\t secondary index: {si.index_name}")
+            print(f"\t secondary index: [{si.original_key}] as [{si.target_name}]")
 
-        table = self.AttachTable(name, [
+        table = self.AttachTable(table_name, [
             Field(self.DATA_KEY, is_pk=True),
             Field(self.DATA_TYPE)
         ], self.DATA_TYPE)
@@ -254,12 +270,12 @@ class Database:
             entries.append((k, jdumps(val)))
             json_keys = json_keys.union(set(val.keys()))
             for si in secondary_indexes:
-                sis += [(name, si.index_name, k, parse(v)) for v in val.get(si.key, list())]
+                sis += [(table_name, si.key_in_secondary_index, k, parse(v)) for v in val.get(si.original_key, list())]
 
         table._insertMany(entries)
         self.secondary_index._insertMany(list(set(sis)))
-        self.si_mappings._insertMany([(name, si.target_name, si.key) for si in secondary_indexes])
-        self.data_table_keys._insertMany([(k, name) for k in json_keys])
+        self.si_mappings._insertMany([(table_name, si.target_name, si.key_in_secondary_index) for si in secondary_indexes])
+        self.data_table_keys._insertMany([(k, table_name) for k in json_keys])
         return table
 
     def ListEntries(self, table_name: Dat|str):
@@ -290,10 +306,11 @@ class Database:
         return data
 
     def GetTraceableAttributes(self):
-        return self.si_mappings.Select('key', True)
+        attrs = list(self.si_mappings.Select('a', unique=True)) + list(self.si_mappings.Select('b', unique=True))
+        return [i[0] for i in attrs]
 
-    def Trace(self, steps: list[TraceStep]) -> TraceResult:
-        if len(steps) == 0: return TraceResult([], steps)
+    def _performTrace(self, steps: list[TraceStep], intermediates=False) -> TraceResult:
+        if len(steps) == 0: return TraceResult([], steps, "")
         def makeSql(use_table_name):
             pk = 'p_key'
             sk = 's_key'
@@ -302,33 +319,73 @@ class Database:
                 x = toLetters(i)
 
                 if len(m) == 1:
-                    return f"si AS {x}", f"{x}.index_name='{key}'" \
-                        + (" AND {x}.table_name='{table}'" if use_table_name else "")
+                    j = f"si AS {x}"
+                    w = f"{x}.index_name='{key}'" + (f" AND {x}.table_name='{table}'" if use_table_name else "")
+                    n = f"{x}.{pk if fwd else sk}, {x}.{sk if fwd else pk}"
+                    return n, j, w
 
                 f2, k2, t2 = m[1]
                 y = toLetters(i+1)
                 link = f"{x}.{sk if fwd else pk}={y}.{pk if f2 else sk}"
+                ka = pk if fwd else sk
+                kb = sk if fwd else pk # kc = ka
                 if len(m) == 2:
+                    names = f"{x}.{ka}, {x}.{kb}, {y}.{ka}"
                     joins = f"si AS {x} INNER JOIN si AS {y} ON {link}"
                     where = f"{x}.index_name='{key}' AND {y}.index_name='{k2}'"
                     if use_table_name: where += f"AND {x}.table_name='{table}' AND {y}.table_name='{t2}'"
                 else:
-                    pjoins, pwhere = recurse(m[1:], i+1)
+                    pnames, pjoins, pwhere = recurse(m[1:], i+1)
+                    names = f"{x}.{ka}, {pnames}"
                     joins = f"si AS {x} INNER JOIN ({pjoins}) ON {link}"
                     where = f"{x}.index_name='{key}'"
                     if use_table_name: where += f"AND {x}.table_name='{table}'"
                     where += f" AND {pwhere}"
-                return joins, where
+                return names, joins, where
 
-            j, w = recurse([ts.tuple for ts in steps], 1)
-            ka = pk if steps[0].forward else sk
-            kb = pk if not steps[-1].forward else sk
-            return f"SELECT {toLetters(1)}.{ka}, {toLetters(len(steps))}.{kb} FROM ({j}) WHERE {w}"
+            n, j, w = recurse([ts.tuple for ts in steps], 1)
+            if intermediates:
+                return f"SELECT DISTINCT {n} FROM ({j}) WHERE {w}"
+            else:
+                ka = pk if steps[0].forward else sk
+                kb = pk if not steps[-1].forward else sk
+                return f"SELECT DISTINCT {toLetters(1)}.{ka}, {toLetters(len(steps))}.{kb} FROM ({j}) WHERE {w}"
         
         use_table_names = len(set([ts.index_name for ts in steps])) != len(steps) # if indexes are not sufficiently unique
         sql = makeSql(use_table_names)
         results: list[tuple[str, str]] = list(self._cur.execute(sql))
-        return TraceResult(results, steps)
+        return TraceResult(results, steps, sql)
+
+    def Trace(self, source: Dat|str, target: Dat|str, intermediates=False):
+        links, rev_links = Dat.GetSILinks()
+
+        t_str = str(target)
+        def search(curr, path, dirs):
+            if curr == t_str: return path+[curr], dirs
+            if curr in path: return None
+
+            nexts:list[tuple[str, bool]] = [(l, True) for l in links.get(curr, [])]
+            nexts += [(l, False) for l in rev_links.get(curr, [])]
+            for n, fwd in nexts:
+                res = search(n, path+[curr], dirs+[fwd])
+                if res is not None: return res
+            return None
+        res = search(str(source), [], [])
+        
+        assert res is not None, f"no conversion found between [{source}] and [{target}]"
+        path, dirs = res
+        trace = []
+        for i, (p, d) in enumerate(zip(path, dirs)):
+            dat = Dat.FromTableName(p if d else path[i+1])
+            # gets the matching set of p, p+1 in dat.si
+            si = dict((str(sorted((s.table_name, s.target_name))), s) for s in dat.secondary_indexes)
+            k = str(sorted((p, path[i+1])))
+            if k not in si:
+                print(k)
+                print(si)
+            si = si[k]
+            trace.append(TraceStep(d, si))
+        return self._performTrace(trace, intermediates)
 
     def Commit(self):
         self._con.commit()
