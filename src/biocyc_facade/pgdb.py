@@ -49,12 +49,12 @@ Dat.GENES.SetSIs([
 
 class Pgdb(Database):
     EXT = 'pgdb'
-    SCHEMA_VER = '1.0'
+    VER = '1.0'
 
     def __init__(self, db_path: str) -> None:
-        super().__init__(db_path, ext=Pgdb.EXT)  
+        super().__init__(db_path, ext=Pgdb.EXT)
 
-def ImportFromBiocyc(db_path: str, flat_files: str) -> Pgdb:
+def ImportFromBiocyc(db_path: str, flat_files: str, silent=False) -> Pgdb:
     if flat_files[-1] == '/': flat_files = flat_files[:-1] 
     assert not os.path.isfile(db_path), f'can not import into {db_path} since it already exists'
     
@@ -64,21 +64,33 @@ def ImportFromBiocyc(db_path: str, flat_files: str) -> Pgdb:
     # get version info
 
     VER_DAT = 'version.dat'
-    version_data = {}
-    with open(f'{flat_files}/{VER_DAT}') as ver:
-        for line in ver:
-            if line.startswith(';;') or line.startswith('//'): continue
-            toks = line[:-1].split('\t')
-            if len(toks) != 2:
-                print(f'unrecognized line in {VER_DAT} [{line}]')
-                continue
-            k, v = toks
-            dictAppend(version_data, k, v)
-        vd_list = [(k, v[0] if len(v)==1 else jdumps(v)) for k, v in version_data.items()]
-        vd_list.append(('Schema_version', Pgdb.SCHEMA_VER))
-    
-    assert len(vd_list)>0, f'{VER_DAT} is empty!'
-    db.info._insertMany(vd_list)
+    INFO_DATS = [VER_DAT, 'species.dat']
+    info_data = {}
+    for info_file in INFO_DATS:
+        path = f'{flat_files}/{info_file}'
+        if not os.path.isfile(path): continue
+        
+        if info_file == VER_DAT:
+            with open(path) as ver:
+                for line in ver:
+                    if line[:2] in [';;', '//'] or line.startswith('#'): continue
+                    toks = line[:-1].split('\t')
+                    if len(toks) != 2:
+                        print(f'unrecognized line in {info_file} [{line}]')
+                        continue
+                    k, v = toks
+                    dictAppend(info_data, k, v)
+                
+        else:
+            idat = parseDat(path, 'UNIQUE-ID', {}, all_fields=True)
+            uid, data = list(idat.items())[0]
+            info_data['UNIQUE-ID'] = uid
+            for k, v in data.items():
+                info_data[k] = v
+    i_list = [(k, v[0] if len(v)==1 else jdumps(v)) for k, v in info_data.items()]
+    i_list.append(('Kernel_version', Pgdb.VER))
+    assert len(i_list)>0, f'no info files!'
+    db.info._insertMany(i_list)
 
     # ==========================================================
     # load dats
@@ -86,15 +98,21 @@ def ImportFromBiocyc(db_path: str, flat_files: str) -> Pgdb:
     counts = 0
     for edat in Dat:
         dat_file: str = edat.file
-        
-        pdat = parseDat(f'{flat_files}/{dat_file}', 'UNIQUE-ID', {
+        path = f'{flat_files}/{dat_file}'
+        if not os.path.isfile(path):
+            if not silent: print(f'skipping {dat_file}, not found')
+            continue
+
+        pdat = parseDat(path, 'UNIQUE-ID', {
             'DBLINKS': lambda x: x[1:-1].replace('"', '').split(' ')[:2],
             'GIBBS-0': lambda x: x.strip(),
             'MOLECULAR-WEIGHT-EXP': lambda x: x.strip(),
         }, all_fields=True)
         counts += len(pdat)
-
-        db.ImportDataTable(edat.table_name, pdat, edat.secondary_indexes)
+        if len(pdat) == 0:
+            if not silent: print(f'{dat_file} was empty')
+        else:
+            db.ImportDataTable(edat.table_name, pdat, edat.secondary_indexes, silent)
 
     db.info._insert(('Total_entries', counts))
 

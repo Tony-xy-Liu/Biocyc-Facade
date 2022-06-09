@@ -192,6 +192,7 @@ class Database:
         if toks[-1] != ext:
             toks.append(ext)
         db_path = '.'.join(toks)
+        self.path = db_path
 
         self._con = sqlite3.connect(db_path)
         self._cur = self._con.cursor()
@@ -248,16 +249,16 @@ class Database:
         self._addTable(table)
         return table
 
-    def ImportDataTable(self, table_name: str, data: dict, secondary_indexes:list[SecondaryIndex]=list()):
-        print(f"loading [{table_name}]")
-        for si in secondary_indexes:
-            print(f"\t secondary index: [{si.original_key}] as [{si.target_name}]")
+    def ImportDataTable(self, table_name: str, data: dict, secondary_indexes:list[SecondaryIndex]=list(), silent=False):
+        if not silent:
+            print(f"loading [{table_name}]")
+            for si in secondary_indexes:
+                print(f"\t secondary index: [{si.original_key}] as [{si.target_name}]")
 
         table = self.AttachTable(table_name, [
             Field(self.DATA_KEY, is_pk=True),
             Field(self.DATA_TYPE)
         ], self.DATA_TYPE)
-
         # for si where reference is tuple (DBLINKS, for ex)
         def parse(v):
             return '_'.join(v) if isinstance(v, list) else str(v)
@@ -282,7 +283,7 @@ class Database:
         table = self.registry.GetTable(str(table_name))
         return [i[0] for i in table.Select(self.DATA_KEY)]
 
-    def GetKeysOfDataTable(self, table_name: str) -> set[str]:
+    def GetKeysOfDataTable(self, table_name: Dat|str) -> set[str]:
         return set([x[0] for x in self.data_table_keys.Select(self.DATA_KEY, where=f"table_name='{table_name}'")])
 
     def GetEntry(self, table_name: Dat|str, key: str):
@@ -389,5 +390,3 @@ class Database:
 
     def Commit(self):
         self._con.commit()
-
-

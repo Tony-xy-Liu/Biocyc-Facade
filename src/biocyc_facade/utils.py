@@ -35,6 +35,9 @@ def parseDat(fpath: str, key: str, parsers: dict[str, Callable], all_fields: boo
     parsed = {}
     def pushItem():
         nonlocal item
+        if key not in item:
+            print('warning: empty item')
+            return
         ik = item[key][0]
         del item[key]
         parsed[ik] = item
@@ -72,8 +75,9 @@ def parseDat(fpath: str, key: str, parsers: dict[str, Callable], all_fields: boo
     while 1:
         line = file.readline()
         if not line: # end
-            parseField(entry)
-            pushItem()
+            if len(entry) > 0:
+                parseField(entry)
+                pushItem()
             break
         if line.startswith('#'): continue
         if line.startswith('//'): continue
