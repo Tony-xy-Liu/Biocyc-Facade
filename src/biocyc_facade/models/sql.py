@@ -131,7 +131,7 @@ class Table:
         assert len(values) == len(self.fields), f'expected {len(self.fields)} columns, got {len(values)}'
         self._insert_helper(self._cur.execute, values)
 
-    def _insertMany(self, values:list[tuple]):
+    def _insert_many(self, values:list[tuple]):
         self._insert_helper(self._cur.executemany, values)
 
 class RegistryTable(Table):
@@ -187,6 +187,9 @@ class RegistryTable(Table):
 class Database:
     DATA_KEY = 'key'
     DATA_TYPE = 'json'
+    SI_NAME = 'si_name'
+    SI_KEY = 'si_key'
+    SI_TARGET = 'parent_key' # value should match DATA_KEY
     def __init__(self, db_path: str, ext:str='db') -> None:
         toks = db_path.split('.')
         if toks[-1] != ext:
@@ -205,19 +208,6 @@ class Database:
                 return r.GetTable(name)
             else:
                 return self.AttachTable(name, fields, ttype)
-
-        self.secondary_index = create_if_not_exists('si',[
-            Field('table_name', is_pk=True),
-            Field('index_name', is_pk=True), # todo: split into multiple tables
-            Field('p_key', is_pk=True),
-            Field('s_key', is_pk=True),
-        ], 'secondary_index')
-
-        self.si_mappings = create_if_not_exists('sim', [
-            Field('a', True),
-            Field('b', True),
-            Field('index_name', False),
-        ], 'secondary_index_mappings')
 
         self.data_table_keys = create_if_not_exists('data_keys', [
             Field('key', is_pk=True),
@@ -249,6 +239,9 @@ class Database:
         self._addTable(table)
         return table
 
+    def _si_of_table(self, table_name: str):
+        return f'{table_name}_si'
+
     def ImportDataTable(self, table_name: str, data: dict, secondary_indexes:list[SecondaryIndex]=list(), silent=False):
         if not silent:
             print(f"loading [{table_name}]")
@@ -258,6 +251,11 @@ class Database:
         table = self.AttachTable(table_name, [
             Field(self.DATA_KEY, is_pk=True),
             Field(self.DATA_TYPE)
+        ], self.DATA_TYPE)
+        si_table = self.AttachTable(self._si_of_table(table_name), [
+            Field(self.SI_NAME, is_pk=True),
+            Field(self.SI_KEY, is_pk=True),
+            Field(self.SI_TARGET, is_pk=True),
         ], self.DATA_TYPE)
         # for si where reference is tuple (DBLINKS, for ex)
         def parse(v):
@@ -271,12 +269,11 @@ class Database:
             entries.append((k, jdumps(val)))
             json_keys = json_keys.union(set(val.keys()))
             for si in secondary_indexes:
-                sis += [(table_name, si.key_in_secondary_index, k, parse(v)) for v in val.get(si.original_key, list())]
+                sis += [(si.key_in_secondary_index, parse(v), k) for v in val.get(si.original_key, list())]
 
-        table._insertMany(entries)
-        self.secondary_index._insertMany(list(set(sis)))
-        self.si_mappings._insertMany([(table_name, si.target_name, si.key_in_secondary_index) for si in secondary_indexes])
-        self.data_table_keys._insertMany([(k, table_name) for k in json_keys])
+        table._insert_many(entries)
+        si_table._insert_many(list(set(sis)))
+        self.data_table_keys._insert_many([(k, table_name) for k in json_keys])
         return table
 
     def ListEntries(self, table_name: Dat|str):
@@ -286,11 +283,31 @@ class Database:
     def GetKeysOfDataTable(self, table_name: Dat|str) -> set[str]:
         return set([x[0] for x in self.data_table_keys.Select(self.DATA_KEY, where=f"table_name='{table_name}'")])
 
+    def GetSiOfDataTable(self, table_name: Dat|str) -> set[str]:
+        si_name = self._si_of_table(str(table_name))
+        si_table = self.registry.GetTable(si_name)
+        return set(e[0] for e in list(si_table.Select(self.SI_NAME, unique=True)))
+
     def GetEntry(self, table_name: Dat|str, key: str):
         table = self.registry.GetTable(str(table_name))
         res = list(table.Select(self.DATA_TYPE, where=f"{self.DATA_KEY}='{key}'"))
         assert len(res) > 0, f"[{key}] not in {table_name}"
         return jloads(res[0][0])
+
+    def GetEntriesBySI(self, table_name: Dat|str, si_key: str, si_name: str|None=None):
+        si_table = self.registry.GetTable(self._si_of_table(str(table_name)))
+        table = self.registry.GetTable(str(table_name))
+        if STAR in si_key or "%" in si_key:
+            si_key = si_key.replace(STAR, "%")
+            where = f"{self.SI_KEY} LIKE '{si_key}'"
+        else:
+            where = f"{self.SI_KEY}='{si_key}'"
+        if si_name is not None: where += f" AND {self.SI_NAME}='{si_name}'" # need check for si_name in table, omitted for performance
+        entry_keys = [e[0] for e in list(si_table.Select(self.SI_TARGET, where=where))]
+        res = [(key, jloads(e[0])) for key, group in [
+            (key, list(table.Select(self.DATA_TYPE, where=f"{self.DATA_KEY}='{key}'"))) for key in entry_keys
+        ] for e in group]
+        return res
 
     def GetDataTable(self, table_name: Dat|str):
         table = self.registry.GetTable(str(table_name))
@@ -306,87 +323,87 @@ class Database:
             data[k] = v
         return data
 
-    def GetTraceableAttributes(self):
-        attrs = list(self.si_mappings.Select('a', unique=True)) + list(self.si_mappings.Select('b', unique=True))
-        return [i[0] for i in attrs]
+    # def GetTraceableAttributes(self):
+    #     attrs = list(self.si_mappings.Select('a', unique=True)) + list(self.si_mappings.Select('b', unique=True))
+    #     return [i[0] for i in attrs]
 
-    def _performTrace(self, steps: list[TraceStep], intermediates=False) -> TraceResult:
-        if len(steps) == 0: return TraceResult([], steps, "")
-        def makeSql(use_table_name):
-            pk = 'p_key'
-            sk = 's_key'
-            def recurse(m, i):
-                fwd, key, table = m[0]
-                x = toLetters(i)
+    # def _performTrace(self, steps: list[TraceStep], intermediates=False) -> TraceResult:
+    #     if len(steps) == 0: return TraceResult([], steps, "")
+    #     def makeSql(use_table_name):
+    #         pk = 'p_key'
+    #         sk = 's_key'
+    #         def recurse(m, i):
+    #             fwd, key, table = m[0]
+    #             x = toLetters(i)
 
-                if len(m) == 1:
-                    j = f"si AS {x}"
-                    w = f"{x}.index_name='{key}'" + (f" AND {x}.table_name='{table}'" if use_table_name else "")
-                    n = f"{x}.{pk if fwd else sk}, {x}.{sk if fwd else pk}"
-                    return n, j, w
+    #             if len(m) == 1:
+    #                 j = f"si AS {x}"
+    #                 w = f"{x}.index_name='{key}'" + (f" AND {x}.table_name='{table}'" if use_table_name else "")
+    #                 n = f"{x}.{pk if fwd else sk}, {x}.{sk if fwd else pk}"
+    #                 return n, j, w
 
-                f2, k2, t2 = m[1]
-                y = toLetters(i+1)
-                link = f"{x}.{sk if fwd else pk}={y}.{pk if f2 else sk}"
-                ka = pk if fwd else sk
-                kb = sk if fwd else pk # kc = ka
-                if len(m) == 2:
-                    names = f"{x}.{ka}, {x}.{kb}, {y}.{ka}"
-                    joins = f"si AS {x} INNER JOIN si AS {y} ON {link}"
-                    where = f"{x}.index_name='{key}' AND {y}.index_name='{k2}'"
-                    if use_table_name: where += f"AND {x}.table_name='{table}' AND {y}.table_name='{t2}'"
-                else:
-                    pnames, pjoins, pwhere = recurse(m[1:], i+1)
-                    names = f"{x}.{ka}, {pnames}"
-                    joins = f"si AS {x} INNER JOIN ({pjoins}) ON {link}"
-                    where = f"{x}.index_name='{key}'"
-                    if use_table_name: where += f"AND {x}.table_name='{table}'"
-                    where += f" AND {pwhere}"
-                return names, joins, where
+    #             f2, k2, t2 = m[1]
+    #             y = toLetters(i+1)
+    #             link = f"{x}.{sk if fwd else pk}={y}.{pk if f2 else sk}"
+    #             ka = pk if fwd else sk
+    #             kb = sk if fwd else pk # kc = ka
+    #             if len(m) == 2:
+    #                 names = f"{x}.{ka}, {x}.{kb}, {y}.{ka}"
+    #                 joins = f"si AS {x} INNER JOIN si AS {y} ON {link}"
+    #                 where = f"{x}.index_name='{key}' AND {y}.index_name='{k2}'"
+    #                 if use_table_name: where += f"AND {x}.table_name='{table}' AND {y}.table_name='{t2}'"
+    #             else:
+    #                 pnames, pjoins, pwhere = recurse(m[1:], i+1)
+    #                 names = f"{x}.{ka}, {pnames}"
+    #                 joins = f"si AS {x} INNER JOIN ({pjoins}) ON {link}"
+    #                 where = f"{x}.index_name='{key}'"
+    #                 if use_table_name: where += f"AND {x}.table_name='{table}'"
+    #                 where += f" AND {pwhere}"
+    #             return names, joins, where
 
-            n, j, w = recurse([ts.tuple for ts in steps], 1)
-            if intermediates:
-                return f"SELECT DISTINCT {n} FROM ({j}) WHERE {w}"
-            else:
-                ka = pk if steps[0].forward else sk
-                kb = pk if not steps[-1].forward else sk
-                return f"SELECT DISTINCT {toLetters(1)}.{ka}, {toLetters(len(steps))}.{kb} FROM ({j}) WHERE {w}"
+    #         n, j, w = recurse([ts.tuple for ts in steps], 1)
+    #         if intermediates:
+    #             return f"SELECT DISTINCT {n} FROM ({j}) WHERE {w}"
+    #         else:
+    #             ka = pk if steps[0].forward else sk
+    #             kb = pk if not steps[-1].forward else sk
+    #             return f"SELECT DISTINCT {toLetters(1)}.{ka}, {toLetters(len(steps))}.{kb} FROM ({j}) WHERE {w}"
         
-        use_table_names = len(set([ts.index_name for ts in steps])) != len(steps) # if indexes are not sufficiently unique
-        sql = makeSql(use_table_names)
-        results: list[tuple[str, str]] = list(self._cur.execute(sql))
-        return TraceResult(results, steps, sql)
+    #     use_table_names = len(set([ts.index_name for ts in steps])) != len(steps) # if indexes are not sufficiently unique
+    #     sql = makeSql(use_table_names)
+    #     results: list[tuple[str, str]] = list(self._cur.execute(sql))
+    #     return TraceResult(results, steps, sql)
 
-    def Trace(self, source: Dat|str, target: Dat|str, intermediates=False):
-        links, rev_links = Dat.GetSILinks()
+    # def Trace(self, source: Dat|str, target: Dat|str, intermediates=False):
+    #     links, rev_links = Dat.GetSILinks()
 
-        t_str = str(target)
-        def search(curr, path, dirs):
-            if curr == t_str: return path+[curr], dirs
-            if curr in path: return None
+    #     t_str = str(target)
+    #     def search(curr, path, dirs):
+    #         if curr == t_str: return path+[curr], dirs
+    #         if curr in path: return None
 
-            nexts:list[tuple[str, bool]] = [(l, True) for l in links.get(curr, [])]
-            nexts += [(l, False) for l in rev_links.get(curr, [])]
-            for n, fwd in nexts:
-                res = search(n, path+[curr], dirs+[fwd])
-                if res is not None: return res
-            return None
-        res = search(str(source), [], [])
+    #         nexts:list[tuple[str, bool]] = [(l, True) for l in links.get(curr, [])]
+    #         nexts += [(l, False) for l in rev_links.get(curr, [])]
+    #         for n, fwd in nexts:
+    #             res = search(n, path+[curr], dirs+[fwd])
+    #             if res is not None: return res
+    #         return None
+    #     res = search(str(source), [], [])
         
-        assert res is not None, f"no conversion found between [{source}] and [{target}]"
-        path, dirs = res
-        trace = []
-        for i, (p, d) in enumerate(zip(path, dirs)):
-            dat = Dat.FromTableName(p if d else path[i+1])
-            # gets the matching set of p, p+1 in dat.si
-            si = dict((str(sorted((s.table_name, s.target_name))), s) for s in dat.secondary_indexes)
-            k = str(sorted((p, path[i+1])))
-            if k not in si:
-                print(k)
-                print(si)
-            si = si[k]
-            trace.append(TraceStep(d, si))
-        return self._performTrace(trace, intermediates)
+    #     assert res is not None, f"no conversion found between [{source}] and [{target}]"
+    #     path, dirs = res
+    #     trace = []
+    #     for i, (p, d) in enumerate(zip(path, dirs)):
+    #         dat = Dat.FromTableName(p if d else path[i+1])
+    #         # gets the matching set of p, p+1 in dat.si
+    #         si = dict((str(sorted((s.table_name, s.target_name))), s) for s in dat.secondary_indexes)
+    #         k = str(sorted((p, path[i+1])))
+    #         if k not in si:
+    #             print(k)
+    #             print(si)
+    #         si = si[k]
+    #         trace.append(TraceStep(d, si))
+    #     return self._performTrace(trace, intermediates)
 
     def Commit(self):
         self._con.commit()

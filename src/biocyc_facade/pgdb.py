@@ -21,26 +21,30 @@ class Dat(sqlDat):
     SPECIES = 'species.dat'
 
 Dat.PROTEINS.SetSIs([
-    ('DBLINKS', 'P-DBLINKS'),
+    ('TYPES', 'P-TYPES'),
     ('COMMON-NAME', 'P-COMMON-NAME'),
+    ('DBLINKS', 'P-DBLINKS'),
 ])
 Dat.COMPOUNDS.SetSIs([
+    ('TYPES', 'C-TYPES'),
     ('COMMON-NAME', 'C-COMMON-NAME')
 ])
 Dat.REACTIONS.SetSIs([
-    ('EC-NUMBER', 'EC-NUMBER'),
+    ('TYPES', 'R-TYPES'),
     ('COMMON-NAME', 'R-COMMON-NAME'),
+    ('EC-NUMBER', 'EC-NUMBER'),
     ('LEFT', 'REACTANTS'),
     ('RIGHT', 'PRODUCTS'),
 ])
 Dat.ENZRXNS.SetSIs([
+    ('COMMON-NAME', 'E-COMMON-NAME'),
     ('REACTION', Dat.REACTIONS, 'E->REACTIONS'),
     ('ENZYME', Dat.PROTEINS),
-    ('COMMON-NAME', 'E-COMMON-NAME'),
 ])
 Dat.PATHWAYS.SetSIs([
-    ('REACTION-LIST', Dat.REACTIONS, 'W->REACTIONS'),
+    ('TYPES', 'W-TYPES'),
     ('COMMON-NAME', 'W-COMMON-NAME'),
+    ('REACTION-LIST', Dat.REACTIONS, 'W->REACTIONS'),
 ])
 Dat.GENES.SetSIs([
     ('DBLINKS', 'G-DBLINKS'),
@@ -49,7 +53,7 @@ Dat.GENES.SetSIs([
 
 class Pgdb(Database):
     EXT = 'pgdb'
-    VER = '1.0'
+    VER = '1.1'
 
     def __init__(self, db_path: str) -> None:
         super().__init__(db_path, ext=Pgdb.EXT)
@@ -90,7 +94,7 @@ def ImportFromBiocyc(db_path: str, flat_files: str, silent=False) -> Pgdb:
     i_list = [(k, v[0] if len(v)==1 else jdumps(v)) for k, v in info_data.items()]
     i_list.append(('Kernel_version', Pgdb.VER))
     assert len(i_list)>0, f'no info files!'
-    db.info._insertMany(i_list)
+    db.info._insert_many(i_list)
 
     # ==========================================================
     # load dats
