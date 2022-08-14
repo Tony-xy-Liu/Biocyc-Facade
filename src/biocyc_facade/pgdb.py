@@ -92,7 +92,7 @@ def ImportFromBiocyc(db_path: str, flat_files: str, silent=False) -> Pgdb:
             for k, v in data.items():
                 info_data[k] = v
     i_list = [(k, v[0] if len(v)==1 else jdumps(v)) for k, v in info_data.items()]
-    i_list.append(('Kernel_version', Pgdb.VER))
+    i_list.append(('biocyc_facade_ver', Pgdb.VER))
     assert len(i_list)>0, f'no info files!'
     db.info._insert_many(i_list)
 
