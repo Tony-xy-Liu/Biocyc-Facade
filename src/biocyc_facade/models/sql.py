@@ -209,6 +209,8 @@ class Database:
             else:
                 return self.AttachTable(name, fields, ttype)
 
+        self._cached_tables: dict[str, dict] = {}
+
         self.data_table_keys = create_if_not_exists('data_keys', [
             Field('key', is_pk=True),
             Field('table_name', is_pk=True),
@@ -310,7 +312,11 @@ class Database:
         return res
 
     def GetDataTable(self, table_name: Dat|str):
-        table = self.registry.GetTable(str(table_name))
+        table_name = str(table_name)
+        if table_name in self._cached_tables:
+            return self._cached_tables[table_name]
+
+        table = self.registry.GetTable(table_name)
         assert table.type == self.DATA_TYPE, \
             f"[{table}] has type [{table.type}] is not a data table\nuse the registry instead"
         fields = table.fields.values()
@@ -321,6 +327,7 @@ class Database:
             k = '_'.join(entry[:-1])
             v = jloads(j)
             data[k] = v
+        self._cached_tables[table_name] = data
         return data
 
     # def GetTraceableAttributes(self):
