@@ -2,15 +2,14 @@ from __future__ import annotations
 import sys
 import os
 import json
-from enum import Enum
 
-from biocyc_facade.models.sql import STAR, Database, Field, SecondaryIndex as SI, Dat as sqlDat, TraceStep
+from .models.sql import STAR, Database, Field, SecondaryIndex as SI, Dat as sqlDat, TraceStep, TraceResult, Traceable as sqlTraceable
 from .utils import dictAppend, parseDat, jdumps, jloads
 
 class Dat(sqlDat):
     PROTEINS = 'proteins.dat'
     REACTIONS = 'reactions.dat'
-    ENZRXNS = 'enzrxns.dat'
+    ENZYMES = 'enzrxns.dat'
     PATHWAYS = 'pathways.dat'
     GENES = 'genes.dat'
     REGULATION = 'regulation.dat'
@@ -20,43 +19,125 @@ class Dat(sqlDat):
     RNAS = 'rnas.dat'
     SPECIES = 'species.dat'
 
+class Traceable(sqlTraceable):
+    PROT_TYPES = 0
+    PROT_COMMON_NAME = 1
+    PROT_DB_LINKS = 2
+    CMPD_TYPES = 3
+    CMPD_COMMON_NAME = 4
+    RXN_TYPES = 5
+    RXN_COMMON_NAME = 6
+    RXN_EC = 7
+    CMPD_REACTANTS = 8
+    CMPD_PRODUCTS = 9
+    ENZ_COMMON_NAME = 10
+    PATH_TYPES = 11
+    PATH_COMMON_NAME = 12
+    GENE_DB_LINKS = 13
+    GENE_COMMON_NAME = 14
+    PROTEINS = Dat.PROTEINS
+    COMPOUNDS = Dat.COMPOUNDS
+    REACTIONS = Dat.REACTIONS
+    ENZYMES = Dat.ENZYMES
+    PATHWAYS = Dat.PATHWAYS
+    GENES = Dat.GENES
+
+
 Dat.PROTEINS.SetSIs([
-    ('TYPES', 'P-TYPES'),
-    ('COMMON-NAME', 'P-COMMON-NAME'),
-    ('DBLINKS', 'P-DBLINKS'),
+    ('TYPES', Traceable.PROT_TYPES),
+    ('COMMON-NAME', Traceable.PROT_COMMON_NAME),
+    ('DBLINKS', Traceable.PROT_DB_LINKS),
 ])
 Dat.COMPOUNDS.SetSIs([
-    ('TYPES', 'C-TYPES'),
-    ('COMMON-NAME', 'C-COMMON-NAME')
+    ('TYPES', Traceable.CMPD_TYPES),
+    ('COMMON-NAME', Traceable.CMPD_COMMON_NAME)
 ])
 Dat.REACTIONS.SetSIs([
-    ('TYPES', 'R-TYPES'),
-    ('COMMON-NAME', 'R-COMMON-NAME'),
-    ('EC-NUMBER', 'EC-NUMBER'),
-    ('LEFT', 'REACTANTS'),
-    ('RIGHT', 'PRODUCTS'),
+    ('TYPES', Traceable.RXN_TYPES),
+    ('COMMON-NAME', Traceable.RXN_COMMON_NAME),
+    ('EC-NUMBER', Traceable.RXN_EC),
+    ('LEFT', Traceable.CMPD_REACTANTS),
+    ('RIGHT', Traceable.CMPD_PRODUCTS),
 ])
-Dat.ENZRXNS.SetSIs([
-    ('COMMON-NAME', 'E-COMMON-NAME'),
-    ('REACTION', Dat.REACTIONS, 'E->REACTIONS'),
-    ('ENZYME', Dat.PROTEINS),
+Dat.ENZYMES.SetSIs([
+    ('COMMON-NAME', Traceable.ENZ_COMMON_NAME),
+    ('REACTION', Traceable.REACTIONS, 'E->REACTIONS'),
+    ('ENZYME', Traceable.PROTEINS),
 ])
 Dat.PATHWAYS.SetSIs([
-    ('TYPES', 'W-TYPES'),
-    ('COMMON-NAME', 'W-COMMON-NAME'),
-    ('REACTION-LIST', Dat.REACTIONS, 'W->REACTIONS'),
+    ('TYPES', Traceable.PATH_TYPES),
+    ('COMMON-NAME', Traceable.PATH_COMMON_NAME),
+    ('REACTION-LIST', Traceable.REACTIONS, 'W->REACTIONS'),
 ])
 Dat.GENES.SetSIs([
-    ('DBLINKS', 'G-DBLINKS'),
-    ('COMMON-NAME', 'G-COMMON-NAME'),
+    ('DBLINKS', Traceable.GENE_DB_LINKS),
+    ('COMMON-NAME', Traceable.GENE_COMMON_NAME),
 ])
 
 class Pgdb(Database):
     EXT = 'pgdb'
-    VER = '1.1'
+    VER = '1.2'
 
     def __init__(self, db_path: str) -> None:
         super().__init__(db_path, ext=Pgdb.EXT)
+        self._mappings = {}
+
+    def _performTrace(self, steps: list[TraceStep], intermediates=False) -> TraceResult:
+        def _get_mapping_k(step: TraceStep):
+            table, key = step.secondary_index.table_name, step.secondary_index.original_key
+            return table, key
+
+        def _add_mapping(step: TraceStep):
+            _, k, table_name = step.tuple
+            table = self.registry.GetTable(self._si_of_table(table_name))
+            r_map, map = {}, {}
+            for my_k, target in table.Select([self.SI_KEY, self.SI_TARGET], where=f"{self.SI_NAME}='{k}'", unique=True):
+                r_map[my_k] = r_map.get(my_k, []) + [target]
+                map[target] = map.get(target, []) + [my_k]
+            
+            self._mappings[_get_mapping_k(step)] = map, r_map
+
+        maps = []
+        for step in steps:
+            if step.secondary_index not in self._mappings: _add_mapping(step)
+            f_map, r_map = self._mappings[_get_mapping_k(step)]
+            map = f_map if step.forward else r_map
+            maps.append(map)
+
+        def _get_children(key: str|None, depth: int) -> set[str]|set[None]:
+            # allow for self_referential steps
+            children = set()
+            to_check: list = list(maps[depth].get(key, []))
+            while len(to_check) > 0:
+                child = to_check.pop()
+                children.add(child)
+                additional = maps[depth].get(child, [])
+                to_check += additional
+            # children = set(to_check)
+            return children if len(children) > 0 else set([None])
+
+        def _trace(key:str|None, depth: int) -> list[tuple]:
+            if depth >= len(maps): return [(key,)]
+            children = _get_children(key, depth)
+            return [(key,)+rest for g in [_trace(child, depth+1) for child in children] for rest in g]
+            
+
+        # first_keys = [k for g in [_get_children(ch, 0) for ch in maps[0]] for k in g]
+        results = [trace for g in [_trace(key, 0) for key in maps[0]] for trace in g]
+        if not intermediates:
+            results = list(set([(t[0], t[-1]) for t in results if t[-1] is not None]))
+
+        sql = "* used dictionaries instead"
+        return TraceResult(results, steps, sql)
+
+def Trace_to_maps(trace: TraceResult) -> tuple[dict, dict]:
+    map, r_map = {}, {}
+    for t in trace:
+        ka, kb = t[0], t[-1]
+        map[ka] = map.get(ka, [])+[kb]
+        r_map[kb] = r_map.get(kb, [])+[ka]
+    return map, r_map
+
 
 def ImportFromBiocyc(db_path: str, flat_files: str, silent=False) -> Pgdb:
     if flat_files[-1] == '/': flat_files = flat_files[:-1] 

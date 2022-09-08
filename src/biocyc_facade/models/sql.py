@@ -1,8 +1,9 @@
 from __future__ import annotations
+import re
 import sqlite3
 import atexit
 from enum import Enum
-from typing import Iterator, Literal, Any
+from typing import Iterable, Iterator, Literal, Any
 
 from ..utils import dictAppend, jdumps, jloads, toLetters
 class SecondaryIndex:
@@ -23,7 +24,7 @@ class TraceStep:
         self.tuple = (forward, index.key_in_secondary_index, self.table_name)
 
 class TraceResult:
-    def __init__(self, result: list[tuple[str, str]], steps: list[TraceStep], sql: str) -> None:
+    def __init__(self, result: Iterable, steps: list[TraceStep], sql: str) -> None:
         self.results = result
         self.steps = steps
         self.explanation = []
@@ -31,13 +32,10 @@ class TraceResult:
             a = s.secondary_index.table_name
             b = s.secondary_index.target_name
             self.explanation.append((f"{a} -> {b}" if s.forward else f"{b} -> {a}", f"via {s.table_name}.{s.index_name}"))
-        self.is_empty = len(self.results) == 0
         self.sql = sql
 
     def __iter__(self):
         return self.results.__iter__()
-    def __getitem__(self, i):
-        return self.results[i]
 
 class _dat_statics:
     fwd = {}
@@ -74,10 +72,23 @@ class Dat(Enum):
             dictAppend(_dat_statics.rev, si.target_name, self.table_name, unique=True)
             self.secondary_indexes.append(si)
 
-
+    def GetSecondaryIndexes(self):
+        return 
 
     def __str__(self) -> str:
         return self.table_name
+
+class Traceable(Enum):
+    def __init__(self, val) -> None:
+        super().__init__()
+        if isinstance(val, Dat):
+            self.alt_value = val
+        else:
+            self.alt_value = None
+
+    def __str__(self):
+        return self.alt_value.__str__() if self.alt_value is not None else self.name
+
 
 STAR: Literal['*'] = '*'
 class DType(Enum):
@@ -330,87 +341,90 @@ class Database:
         self._cached_tables[table_name] = data
         return data
 
-    # def GetTraceableAttributes(self):
-    #     attrs = list(self.si_mappings.Select('a', unique=True)) + list(self.si_mappings.Select('b', unique=True))
-    #     return [i[0] for i in attrs]
+    def _performTrace(self, steps: list[TraceStep], intermediates=False) -> TraceResult:
+        if len(steps) == 0: return TraceResult([], steps, "")
+        def makeSql():
+            pk = self.SI_TARGET
+            sk = self.SI_KEY
+            def recurse(m, i):
+                fwd, key, table = m[0]
+                x = toLetters(i)
 
-    # def _performTrace(self, steps: list[TraceStep], intermediates=False) -> TraceResult:
-    #     if len(steps) == 0: return TraceResult([], steps, "")
-    #     def makeSql(use_table_name):
-    #         pk = 'p_key'
-    #         sk = 's_key'
-    #         def recurse(m, i):
-    #             fwd, key, table = m[0]
-    #             x = toLetters(i)
+                if len(m) == 1:
+                    j = f"{self._si_of_table(table)} AS {x}"
+                    w = f"{x}.{self.SI_NAME}='{key}'"
+                    n = f"{x}.{pk if fwd else sk}, {x}.{sk if fwd else pk}"
+                    return n, j, w
 
-    #             if len(m) == 1:
-    #                 j = f"si AS {x}"
-    #                 w = f"{x}.index_name='{key}'" + (f" AND {x}.table_name='{table}'" if use_table_name else "")
-    #                 n = f"{x}.{pk if fwd else sk}, {x}.{sk if fwd else pk}"
-    #                 return n, j, w
+                f2, k2, t2 = m[1]
+                y = toLetters(i+1)
+                link = f"{x}.{sk if fwd else pk}={y}.{pk if f2 else sk}"
+                ka = pk if fwd else sk
+                kb = sk if fwd else pk # kc = ka
+                if len(m) == 2:
+                    names = f"{x}.{ka}, {x}.{kb}, {y}.{ka}"
+                    joins = f"{self._si_of_table(table)} AS {x} INNER JOIN {self._si_of_table(t2)} AS {y} ON {link}"
+                    where = f"{x}.{self.SI_NAME}='{key}' AND {y}.{self.SI_NAME}='{k2}'"
+                else:
+                    pnames, pjoins, pwhere = recurse(m[1:], i+1)
+                    names = f"{x}.{ka}, {pnames}"
+                    joins = f"{self._si_of_table(table)} AS {x} INNER JOIN ({pjoins}) ON {link}"
+                    where = f"{x}.{self.SI_NAME}='{key}'"
+                    where += f" AND {pwhere}"
+                return names, joins, where
 
-    #             f2, k2, t2 = m[1]
-    #             y = toLetters(i+1)
-    #             link = f"{x}.{sk if fwd else pk}={y}.{pk if f2 else sk}"
-    #             ka = pk if fwd else sk
-    #             kb = sk if fwd else pk # kc = ka
-    #             if len(m) == 2:
-    #                 names = f"{x}.{ka}, {x}.{kb}, {y}.{ka}"
-    #                 joins = f"si AS {x} INNER JOIN si AS {y} ON {link}"
-    #                 where = f"{x}.index_name='{key}' AND {y}.index_name='{k2}'"
-    #                 if use_table_name: where += f"AND {x}.table_name='{table}' AND {y}.table_name='{t2}'"
-    #             else:
-    #                 pnames, pjoins, pwhere = recurse(m[1:], i+1)
-    #                 names = f"{x}.{ka}, {pnames}"
-    #                 joins = f"si AS {x} INNER JOIN ({pjoins}) ON {link}"
-    #                 where = f"{x}.index_name='{key}'"
-    #                 if use_table_name: where += f"AND {x}.table_name='{table}'"
-    #                 where += f" AND {pwhere}"
-    #             return names, joins, where
-
-    #         n, j, w = recurse([ts.tuple for ts in steps], 1)
-    #         if intermediates:
-    #             return f"SELECT DISTINCT {n} FROM ({j}) WHERE {w}"
-    #         else:
-    #             ka = pk if steps[0].forward else sk
-    #             kb = pk if not steps[-1].forward else sk
-    #             return f"SELECT DISTINCT {toLetters(1)}.{ka}, {toLetters(len(steps))}.{kb} FROM ({j}) WHERE {w}"
+            n, j, w = recurse([ts.tuple for ts in steps], 1)
+            if intermediates:
+                return f"SELECT DISTINCT {n} FROM ({j}) WHERE {w}"
+                # return f"SELECT DISTINCT {n} FROM ({j})"
+            else:
+                ka = pk if steps[0].forward else sk
+                kb = pk if not steps[-1].forward else sk
+                return f"SELECT DISTINCT {toLetters(1)}.{ka}, {toLetters(len(steps))}.{kb} FROM ({j}) WHERE {w}"
+                # return f"SELECT DISTINCT {toLetters(1)}.{ka}, {toLetters(len(steps))}.{kb} FROM ({j})"
         
-    #     use_table_names = len(set([ts.index_name for ts in steps])) != len(steps) # if indexes are not sufficiently unique
-    #     sql = makeSql(use_table_names)
-    #     results: list[tuple[str, str]] = list(self._cur.execute(sql))
-    #     return TraceResult(results, steps, sql)
+        # use_table_names = len(set([ts.index_name for ts in steps])) != len(steps) # if indexes are not sufficiently unique
+        sql = makeSql()
+        # # return sql
+        # return self._cur.execute(sql)
+        # results: list[tuple[str, str]] = list(self._cur.execute(sql))
+        return TraceResult(self._cur.execute(sql), steps, sql)
 
-    # def Trace(self, source: Dat|str, target: Dat|str, intermediates=False):
-    #     links, rev_links = Dat.GetSILinks()
+    def _calc_trace(self, source: Traceable, target: Traceable):
+        links, rev_links = Dat.GetSILinks()
 
-    #     t_str = str(target)
-    #     def search(curr, path, dirs):
-    #         if curr == t_str: return path+[curr], dirs
-    #         if curr in path: return None
+        t_str = str(target)
+        def search(curr, path, dirs):
+            if curr == t_str: return path+[curr], dirs
+            if curr in path: return None
 
-    #         nexts:list[tuple[str, bool]] = [(l, True) for l in links.get(curr, [])]
-    #         nexts += [(l, False) for l in rev_links.get(curr, [])]
-    #         for n, fwd in nexts:
-    #             res = search(n, path+[curr], dirs+[fwd])
-    #             if res is not None: return res
-    #         return None
-    #     res = search(str(source), [], [])
+            nexts:list[tuple[str, bool]] = [(l, True) for l in links.get(curr, [])]
+            nexts += [(l, False) for l in rev_links.get(curr, [])]
+            for n, fwd in nexts:
+                res = search(n, path+[curr], dirs+[fwd])
+                if res is not None: return res
+            return None
+        res = search(str(source), [], [])
         
-    #     assert res is not None, f"no conversion found between [{source}] and [{target}]"
-    #     path, dirs = res
-    #     trace = []
-    #     for i, (p, d) in enumerate(zip(path, dirs)):
-    #         dat = Dat.FromTableName(p if d else path[i+1])
-    #         # gets the matching set of p, p+1 in dat.si
-    #         si = dict((str(sorted((s.table_name, s.target_name))), s) for s in dat.secondary_indexes)
-    #         k = str(sorted((p, path[i+1])))
-    #         if k not in si:
-    #             print(k)
-    #             print(si)
-    #         si = si[k]
-    #         trace.append(TraceStep(d, si))
-    #     return self._performTrace(trace, intermediates)
+        assert res is not None, f"no conversion found between [{source}] and [{target}]"
+        path, dirs = res
+        trace = []
+        for i, (p, d) in enumerate(zip(path, dirs)):
+            dat = Dat.FromTableName(p if d else path[i+1])
+            # gets the matching set of p, p+1 in dat.si
+            si = dict((str(sorted((s.table_name, s.target_name))), s) for s in dat.secondary_indexes)
+            k = str(sorted((p, path[i+1])))
+            if k not in si:
+                print(k)
+                print(si)
+            si = si[k]
+            trace.append(TraceStep(d, si))
+
+        return trace
+
+    def Trace(self, source: Traceable, target: Traceable, intermediates=False):
+        trace = self._calc_trace(source, target)
+        return self._performTrace(trace, intermediates)
 
     def Commit(self):
         self._con.commit()
