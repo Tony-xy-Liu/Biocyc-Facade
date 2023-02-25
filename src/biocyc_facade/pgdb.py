@@ -62,7 +62,7 @@ Dat.REACTIONS.SetSIs([
 Dat.ENZYMES.SetSIs([
     ('COMMON-NAME', Traceable.ENZ_COMMON_NAME),
     ('REACTION', Traceable.REACTIONS, 'E->REACTIONS'),
-    ('ENZYME', Traceable.PROTEINS),
+    ('ENZYME', Traceable.PROTEINS, 'E->PROTEINS'),
 ])
 Dat.PATHWAYS.SetSIs([
     ('TYPES', Traceable.PATH_TYPES),
@@ -72,11 +72,12 @@ Dat.PATHWAYS.SetSIs([
 Dat.GENES.SetSIs([
     ('DBLINKS', Traceable.GENE_DB_LINKS),
     ('COMMON-NAME', Traceable.GENE_COMMON_NAME),
+    ('PRODUCT', Traceable.PROTEINS, 'G->PROTEINS'),
 ])
 
 class Pgdb(Database):
     EXT = 'pgdb'
-    VER = '1.2'
+    VER = '1.3'
 
     def __init__(self, db_path: str) -> None:
         super().__init__(db_path, ext=Pgdb.EXT)
@@ -112,16 +113,16 @@ class Pgdb(Database):
                 child = to_check.pop()
                 children.add(child)
                 additional = maps[depth].get(child, [])
-                to_check += additional
+                to_check += [c for c in additional if c not in children]
             # children = set(to_check)
             return children if len(children) > 0 else set([None])
 
+        c = 0
         def _trace(key:str|None, depth: int) -> list[tuple]:
             if depth >= len(maps): return [(key,)]
             children = _get_children(key, depth)
             return [(key,)+rest for g in [_trace(child, depth+1) for child in children] for rest in g]
             
-
         # first_keys = [k for g in [_get_children(ch, 0) for ch in maps[0]] for k in g]
         results = [trace for g in [_trace(key, 0) for key in maps[0]] for trace in g]
         if not intermediates:
@@ -130,76 +131,100 @@ class Pgdb(Database):
         sql = "* used dictionaries instead"
         return TraceResult(results, steps, sql)
 
-def Trace_to_maps(trace: TraceResult) -> tuple[dict, dict]:
-    map, r_map = {}, {}
-    for t in trace:
-        ka, kb = t[0], t[-1]
-        map[ka] = map.get(ka, [])+[kb]
-        r_map[kb] = r_map.get(kb, [])+[ka]
-    return map, r_map
+    def _insert_info(self, info_data: dict):
+        info_data['biocyc_facade_ver'] = Pgdb.VER
+        i_list = [(k, v[0] if len(v)==1 else jdumps(v)) for k, v in info_data.items()]
+        assert len(i_list)>0, f'no info files!'
+        self.info._insert_many(i_list)
 
-
-def ImportFromBiocyc(db_path: str, flat_files: str, silent=False) -> Pgdb:
-    if flat_files[-1] == '/': flat_files = flat_files[:-1] 
-    assert not os.path.isfile(db_path), f'can not import into {db_path} since it already exists'
-    
-    db = Pgdb(db_path)
-
-    # ==========================================================
-    # get version info
-
-    VER_DAT = 'version.dat'
-    INFO_DATS = [VER_DAT, 'species.dat']
-    info_data = {}
-    for info_file in INFO_DATS:
-        path = f'{flat_files}/{info_file}'
-        if not os.path.isfile(path): continue
+    @classmethod
+    def ImportFromBiocyc(cls, db_path: str, flat_files: str, silent=False) -> Pgdb:
+        if flat_files[-1] == '/': flat_files = flat_files[:-1] 
+        assert not os.path.isfile(db_path), f'can not import into {db_path} since it already exists'
         
-        if info_file == VER_DAT:
-            with open(path) as ver:
-                for line in ver:
-                    if line[:2] in [';;', '//'] or line.startswith('#'): continue
-                    toks = line[:-1].split('\t')
-                    if len(toks) != 2:
-                        print(f'unrecognized line in {info_file} [{line}]')
-                        continue
-                    k, v = toks
-                    dictAppend(info_data, k, v)
-                
-        else:
-            idat = parseDat(path, 'UNIQUE-ID', {}, all_fields=True)
-            uid, data = list(idat.items())[0]
-            info_data['UNIQUE-ID'] = uid
-            for k, v in data.items():
-                info_data[k] = v
-    i_list = [(k, v[0] if len(v)==1 else jdumps(v)) for k, v in info_data.items()]
-    i_list.append(('biocyc_facade_ver', Pgdb.VER))
-    assert len(i_list)>0, f'no info files!'
-    db.info._insert_many(i_list)
+        db = Pgdb(db_path)
 
-    # ==========================================================
-    # load dats
+        # ==========================================================
+        # get version info
 
-    counts = 0
-    for edat in Dat:
-        dat_file: str = edat.file
-        path = f'{flat_files}/{dat_file}'
-        if not os.path.isfile(path):
-            if not silent: print(f'skipping {dat_file}, not found')
-            continue
+        VER_DAT = 'version.dat'
+        INFO_DATS = [VER_DAT, 'species.dat']
+        info_data = {}
+        for info_file in INFO_DATS:
+            path = f'{flat_files}/{info_file}'
+            if not os.path.isfile(path): continue
+            
+            if info_file == VER_DAT:
+                with open(path) as ver:
+                    for line in ver:
+                        if line[:2] in [';;', '//'] or line.startswith('#'): continue
+                        toks = line[:-1].split('\t')
+                        if len(toks) != 2:
+                            print(f'unrecognized line in {info_file} [{line}]')
+                            continue
+                        k, v = toks
+                        dictAppend(info_data, k, v)
+                    
+            else:
+                idat = parseDat(path, 'UNIQUE-ID', {}, all_fields=True)
+                uid, data = list(idat.items())[0]
+                info_data['UNIQUE-ID'] = uid
+                for k, v in data.items():
+                    info_data[k] = v
+        db._insert_info(info_data)
 
-        pdat = parseDat(path, 'UNIQUE-ID', {
-            'DBLINKS': lambda x: x[1:-1].replace('"', '').split(' ')[:2],
-            'GIBBS-0': lambda x: x.strip(),
-            'MOLECULAR-WEIGHT-EXP': lambda x: x.strip(),
-        }, all_fields=True)
-        counts += len(pdat)
-        if len(pdat) == 0:
-            if not silent: print(f'{dat_file} was empty')
-        else:
+        # ==========================================================
+        # load dats
+
+        counts = 0
+        for edat in Dat:
+            dat_file: str = edat.file
+            path = f'{flat_files}/{dat_file}'
+            if not os.path.isfile(path):
+                if not silent: print(f'skipping {dat_file}, not found')
+                continue
+
+            pdat = parseDat(path, 'UNIQUE-ID', {
+                'DBLINKS': lambda x: x[1:-1].replace('"', '').split(' ')[:2],
+                'GIBBS-0': lambda x: x.strip(),
+                'MOLECULAR-WEIGHT-EXP': lambda x: x.strip(),
+            }, all_fields=True)
+            counts += len(pdat)
+            if len(pdat) == 0:
+                if not silent: print(f'{dat_file} was empty')
+            else:
+                db.ImportDataTable(edat.table_name, pdat, edat.secondary_indexes, silent)
+
+        db.info._insert(('Total_entries', counts))
+
+        db.Commit()
+        return db
+
+    def UpdateSchema(self, new_db_path: str, silent=False) -> Pgdb:
+        assert not os.path.isfile(new_db_path), f'can not import into {new_db_path} since it already exists'
+        
+        db = Pgdb(new_db_path)
+
+        # ==========================================================
+        # get version info
+        info_data = self.GetInfo()
+        count_k = 'Total_entries'
+        if count_k in info_data: del info_data[count_k]
+        db._insert_info(info_data)
+
+        # ==========================================================
+        # load dats
+
+        counts = 0
+        for edat in Dat:
+            try:
+                pdat = self.GetDataTable(edat)
+                counts += len(pdat)
+            except AssertionError:
+                if not silent: print(f"{edat} didn't exist!")
+                continue
             db.ImportDataTable(edat.table_name, pdat, edat.secondary_indexes, silent)
 
-    db.info._insert(('Total_entries', counts))
-
-    db.Commit()
-    return db
+        db.info._insert(('Total_entries', counts))
+        db.Commit()
+        return db

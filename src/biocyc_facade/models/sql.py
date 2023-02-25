@@ -36,6 +36,14 @@ class TraceResult:
 
     def __iter__(self):
         return self.results.__iter__()
+    
+    def ToMaps(self) -> tuple[dict, dict]:
+        map, r_map = {}, {}
+        for t in self:
+            ka, kb = t[0], t[-1]
+            map[ka] = map.get(ka, [])+[kb]
+            r_map[kb] = r_map.get(kb, [])+[ka]
+        return map, r_map
 
 class _dat_statics:
     fwd = {}
@@ -349,7 +357,7 @@ class Database:
             def recurse(m, i):
                 fwd, key, table = m[0]
                 x = toLetters(i)
-
+                # print(fwd, key, table, i)
                 if len(m) == 1:
                     j = f"{self._si_of_table(table)} AS {x}"
                     w = f"{x}.{self.SI_NAME}='{key}'"
@@ -385,6 +393,7 @@ class Database:
         
         # use_table_names = len(set([ts.index_name for ts in steps])) != len(steps) # if indexes are not sufficiently unique
         sql = makeSql()
+        # print('x')
         # # return sql
         # return self._cur.execute(sql)
         # results: list[tuple[str, str]] = list(self._cur.execute(sql))
