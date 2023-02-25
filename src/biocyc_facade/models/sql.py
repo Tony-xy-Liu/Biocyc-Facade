@@ -244,6 +244,12 @@ class Database:
             self._con.close()
         atexit.register(onExit)
 
+    def __del__(self):
+        self._cur.close()
+        self._con.close()
+        del self.registry
+        del self._cached_tables
+
     def GetInfo(self):
         info = {}
         for k, v in self.info.Select(STAR):

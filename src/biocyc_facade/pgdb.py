@@ -133,7 +133,7 @@ class Pgdb(Database):
 
     def _insert_info(self, info_data: dict):
         for k in list(info_data):
-            if k.lower() != k: del info_data[k] # remove previous custom fields
+            if k.upper() != k: del info_data[k] # remove previous custom fields
         info_data['biocyc_facade_ver'] = Pgdb.VER
         i_list = [(k, v[0] if len(v)==1 else jdumps(v)) for k, v in info_data.items()]
         assert len(i_list)>0, f'no info files!'
@@ -202,8 +202,12 @@ class Pgdb(Database):
         db.Commit()
         return db
 
-    def UpdateSchema(self, new_db_path: str, silent=False) -> Pgdb:
-        assert not os.path.isfile(new_db_path), f'can not import into {new_db_path} since it already exists'
+    def UpdateSchema(self, new_db_path: str, silent=False, _overwrite=False) -> Pgdb:
+        if not _overwrite:
+            assert not os.path.isfile(new_db_path), f'can not import into {new_db_path} since it already exists'
+        elif os.path.exists(new_db_path):
+            print(f"OVERWRITING {new_db_path} !")
+            os.unlink(new_db_path)
         
         db = Pgdb(new_db_path)
 
