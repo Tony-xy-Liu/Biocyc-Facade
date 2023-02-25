@@ -132,6 +132,8 @@ class Pgdb(Database):
         return TraceResult(results, steps, sql)
 
     def _insert_info(self, info_data: dict):
+        for k in list(info_data):
+            if k.lower() != k: del info_data[k] # remove previous custom fields
         info_data['biocyc_facade_ver'] = Pgdb.VER
         i_list = [(k, v[0] if len(v)==1 else jdumps(v)) for k, v in info_data.items()]
         assert len(i_list)>0, f'no info files!'
