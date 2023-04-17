@@ -3,9 +3,12 @@ import re
 import sqlite3
 import atexit
 from enum import Enum
+from pathlib import Path
 from typing import Iterable, Iterator, Literal, Any
 
 from ..utils import dictAppend, jdumps, jloads, toLetters
+
+
 class SecondaryIndex:
     def __init__(self, table: str, key: str, target: str, key_in_index: str='') -> None:
         """specifying a unique @key_in_index will make tracing much faster"""
@@ -209,7 +212,8 @@ class Database:
     SI_NAME = 'si_name'
     SI_KEY = 'si_key'
     SI_TARGET = 'parent_key' # value should match DATA_KEY
-    def __init__(self, db_path: str, ext:str='db') -> None:
+    def __init__(self, db_path: str|Path, ext:str='db') -> None:
+        db_path = str(db_path)
         toks = db_path.split('.')
         if toks[-1] != ext:
             toks.append(ext)

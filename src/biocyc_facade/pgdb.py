@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pathlib import Path
 import sys
 import os
 import json
@@ -79,7 +80,7 @@ class Pgdb(Database):
     EXT = 'pgdb'
     VER = '1.3'
 
-    def __init__(self, db_path: str) -> None:
+    def __init__(self, db_path: str|Path) -> None:
         super().__init__(db_path, ext=Pgdb.EXT)
         self._mappings = {}
 
